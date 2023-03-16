@@ -1,0 +1,359 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "2683d34c-0409-454a-a461-bc34b61247a4",
+   "metadata": {
+    "tags": []
+   },
+   "source": [
+    "# Lake depth assessment: Landsat & ICESat-2  \n",
+    "##### Background:  \n",
+    "_Estimates of the depth of lakes in the arctic are important for understanding the quantity and dynamics of freshwater in a domain experiencing the fastest rates of climate change._  \n",
+    "\n",
+    "### Basic steps:  \n",
+    "1. get Landsat lake depth estimates (Mariana/Caleb)  \n",
+    "   - gridded data processed by our team using custom code   \n",
+    "2. get a time-series of water extent (gridded maps from Pekel et al or Pickens et al)  \n",
+    "   - identify set of 'stable' lakes that are consistent across years  \n",
+    "3. use set of stable lakes to intersect with ICESat-2 lidar observations \n",
+    "   - explore various ICESat-2 lidar datasets:  \n",
+    "         - https://nsidc.org/data/atl13/versions/5  \n",
+    "         - https://nsidc.org/data/atl03/versions/5\n",
+    "   - filter lidar observations by season: July - Sept  \n",
+    "4. Intersect filtered set of lidar observations with stable lakes  \n",
+    "   - get set of lakes with filtered lidar observations\n",
+    "5. Analyze correspondance of Landsat-derived lake depth estimates with ICESat-2 obs"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "f55fa704-b2a3-4767-a878-e71fc70a22ff",
+   "metadata": {},
+   "source": [
+    "### Tools for this work:  \n",
+    "1. Earthdata.nasa.gov  \n",
+    "   - get account  \n",
+    "   - get familiar with earthdata and the manual searching tools  \n",
+    "2. Common metadata repository (CMR) searches (to programatically search for data)  \n",
+    "   - https://www.earthdata.nasa.gov/eosdis/science-system-description/eosdis-components/cmr  \n",
+    "3. working on EXPLORE - working with existing data (ICESat-2 in EXPLORE)\n",
+    "   - support@nccs.nasa.gov can help introduce you to EXPLORE (formerly ADAPT)  \n",
+    "   - using lists from CMR searches to identify useful data (granules names) that you can then access on EXPLORE (might not actually need to download, since we may already have the data)  : `/css/icesat-2/ATLAS`\n",
+    "   - here is an existing notebook that returns a list of ATL08 files (granules) from a CMR spatio-temporal search for a particaulr data type:  \n",
+    "   https://github.com/pahbs/geoscitools/blob/master/find_atl08_CMR_0.1.1.ipynb\n",
+    "3. this notebook, working with key python libraries to handle geoprocessing of raster and vector data: rasterio, geopandas, pandas, pygeotools, etc \n",
+    "4. QGIS (running on a virtual machine launched from EXPLORE)\n",
+    "\n",
+    "### Anticipated results  \n",
+    "1. tables and plots explaining the relationship of our Landsat lake depth estimates to those from spaceborne lidar."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "bc2254da-bdb7-418c-8ec7-6309c48a4672",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import geopandas as gpd\n",
+    "import pandas as pd\n",
+    "import rasterio\n",
+    "import os, sys"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "11ac4f93-5bd7-4d2b-8d63-0a6b078120c5",
+   "metadata": {},
+   "source": [
+    "##### A useful geoprocessing library is _pygeotools_  \n",
+    "you can clone the github repo to a subdir called 'code' in your home directory  \n",
+    "\n",
+    "cd /home/<username>  \n",
+    "mkdir -p code  \n",
+    "cd code  \n",
+    "git clone https://github.com/dshean/pygeotools.git  "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "d8ad4419-a3a8-4f0a-96d2-5f460c6b6c36",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "USERNAME = 'pmontesa'"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "42c25ef4-feae-49a4-9868-5744558d4499",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "sys.path.append(f'/home/{USERNAME}/code/pygeotools')\n",
+    "import pygeotools\n",
+    "sys.path.append(f'/home/{USERNAME}/code/geoscitools')\n",
+    "import atl08lib\n",
+    "import maplib"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "6cf79a85-cd1f-4b9d-97d5-60acb1b4ef57",
+   "metadata": {},
+   "source": [
+    "#### Build ATL08 geodataframe from extracted CSVs that were heavily filtered with land-cover specific thresholds for h_can (canopy height)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "id": "b6dc57d0-df84-45d5-ab0f-53dedc1bedff",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "SITENAME = 'boreal'\n",
+    "main_dir = f'/explore/nobackup/people/pmontesa/userfs02/data/icesat2/atl08.005/{SITENAME}'\n",
+    "\n",
+    "# Approx N. Slope bbox\n",
+    "bbox_name = 'northslope'\n",
+    "minlon = -168\n",
+    "maxlon = -137\n",
+    "minlat = 67.3\n",
+    "maxlat = 71.5\n",
+    "\n",
+    "outdir = '/explore/nobackup/people/pmontesa/userfs02/projects/ilab/lake_depth/data'"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "id": "78be35e8-b248-434e-bece-57252d27f627",
+   "metadata": {
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Building list of ATL08 csvs...\n",
+      "2106\n",
+      "Creating pandas data frame...\n",
+      "Building list of ATL08 csvs...\n",
+      "3027\n",
+      "Creating pandas data frame...\n",
+      "Building list of ATL08 csvs...\n",
+      "1782\n",
+      "Creating pandas data frame...\n",
+      "<class 'geopandas.geodataframe.GeoDataFrame'>\n",
+      "Int64Index: 49671 entries, 168974 to 3400987\n",
+      "Data columns (total 20 columns):\n",
+      " #   Column        Non-Null Count  Dtype   \n",
+      "---  ------        --------------  -----   \n",
+      " 0   lon           49671 non-null  float64 \n",
+      " 1   lat           49671 non-null  float64 \n",
+      " 2   rh25          49671 non-null  float64 \n",
+      " 3   rh50          49671 non-null  float64 \n",
+      " 4   rh60          49671 non-null  float64 \n",
+      " 5   rh70          49671 non-null  float64 \n",
+      " 6   rh75          49671 non-null  float64 \n",
+      " 7   rh80          49671 non-null  float64 \n",
+      " 8   rh90          49671 non-null  float64 \n",
+      " 9   h_can         49671 non-null  float64 \n",
+      " 10  h_max_can     49671 non-null  float64 \n",
+      " 11  h_te_best     49671 non-null  float64 \n",
+      " 12  granule_name  49671 non-null  object  \n",
+      " 13  seg_landcov   49671 non-null  int64   \n",
+      " 14  seg_cover     49671 non-null  int64   \n",
+      " 15  sol_el        49671 non-null  float64 \n",
+      " 16  y             49671 non-null  int64   \n",
+      " 17  m             49671 non-null  int64   \n",
+      " 18  doy           49671 non-null  int64   \n",
+      " 19  geometry      49671 non-null  geometry\n",
+      "dtypes: float64(13), geometry(1), int64(5), object(1)\n",
+      "memory usage: 8.0+ MB\n"
+     ]
+    }
+   ],
+   "source": [
+    "atl08_gdf = pd.concat([atl08lib.atl08_io(main_dir, str(YEAR), DO_PICKLE=False, LENGTH_SEG=100).cx[minlon:maxlon, minlat:maxlat] for YEAR in range(2019, 2022)])\n",
+    "atl08_gdf.to_file(os.path.join(outdir, 'atl08_005_filt_subset_' + bbox_name + '.gpkg'), driver='GPKG')\n",
+    "atl08_gdf.info()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "c0d0a474-89d6-43e3-9f35-adeca9b71ee2",
+   "metadata": {},
+   "source": [
+    "### Map the ATL08 obs\n",
+    "the obs wont intersect lakes, but we'll use them to find good granules that might"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "317ada39-8758-49bf-9e2a-e4d0ce10ddc3",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "maplib.MAP_ATL08_FOLIUM(atl08_gdf.sample(frac=1), MAP_COL='h_can', DO_NIGHT=False, RADIUS=3)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "71db930b-3558-40ee-bb28-9b6a99226420",
+   "metadata": {},
+   "source": [
+    "### Get the list of granules (from this filtered subset)\n",
+    "Use these granules to get ATL13 obs that are likely good, then intersect those AT13 obs with your lakes  \n",
+    "https://stackoverflow.com/questions/38935541/what-is-the-pandas-equivalent-of-dplyr-summarize-aggregate-by-multiple-functions"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "id": "4e5055ca-e312-4f37-9cd5-b70000676e34",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>granule_name</th>\n",
+       "      <th>h_can</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>ATL08_20190710123527_01900403_005_01.h5</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>ATL08_20190712114409_02200403_005_01.h5</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>ATL08_20190712131827_02210403_005_01.h5</td>\n",
+       "      <td>817</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>ATL08_20190713125248_02360403_005_01.h5</td>\n",
+       "      <td>96</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>ATL08_20190714122709_02510403_005_01.h5</td>\n",
+       "      <td>66</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>...</th>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>207</th>\n",
+       "      <td>ATL08_20210920102643_13561205_005_01.h5</td>\n",
+       "      <td>152</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>208</th>\n",
+       "      <td>ATL08_20210921113522_13721205_005_01.h5</td>\n",
+       "      <td>80</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>209</th>\n",
+       "      <td>ATL08_20210922110943_13871205_005_01.h5</td>\n",
+       "      <td>413</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>210</th>\n",
+       "      <td>ATL08_20210923104403_00151305_005_01.h5</td>\n",
+       "      <td>272</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>211</th>\n",
+       "      <td>ATL08_20210930105303_01221305_005_01.h5</td>\n",
+       "      <td>22</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>212 rows × 2 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                granule_name  h_can\n",
+       "0    ATL08_20190710123527_01900403_005_01.h5      3\n",
+       "1    ATL08_20190712114409_02200403_005_01.h5      1\n",
+       "2    ATL08_20190712131827_02210403_005_01.h5    817\n",
+       "3    ATL08_20190713125248_02360403_005_01.h5     96\n",
+       "4    ATL08_20190714122709_02510403_005_01.h5     66\n",
+       "..                                       ...    ...\n",
+       "207  ATL08_20210920102643_13561205_005_01.h5    152\n",
+       "208  ATL08_20210921113522_13721205_005_01.h5     80\n",
+       "209  ATL08_20210922110943_13871205_005_01.h5    413\n",
+       "210  ATL08_20210923104403_00151305_005_01.h5    272\n",
+       "211  ATL08_20210930105303_01221305_005_01.h5     22\n",
+       "\n",
+       "[212 rows x 2 columns]"
+      ]
+     },
+     "execution_count": 25,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "agg_df = atl08_gdf.groupby('granule_name').agg({'h_can': 'count'}).reset_index()\n",
+    "agg_df.to_csv(os.path.join(outdir, 'atl08_005_filt_subset_' + bbox_name + 'smry_granules.csv'))\n",
+    "agg_df"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "ILAB Kernel",
+   "language": "python",
+   "name": "ilab-kernel"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.9.13"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
